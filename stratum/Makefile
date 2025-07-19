@@ -1,7 +1,7 @@
 
 CC= gcc -no-pie
 
-CFLAGS= -g -march=native -I./
+CFLAGS= -g -march=native -I./ -I./kawpow -I./kawpow/include -I./kawpow/lib
 SQLFLAGS= `mysql_config --cflags --libs`
 
 #CFLAGS=-c -O2 -I /usr/include/mysql
