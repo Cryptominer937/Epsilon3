@@ -139,8 +139,17 @@ static void do_lite_skein_hash(const void* input, size_t len, char* output) {
     assert(SKEIN_SUCCESS == r);
 }
 
+static void do_lite_skein_hash_flex(const void* input, size_t len, char* output) {
+    int r = c_skein_hash(8 * HASH_SIZE_FLEX, input, 8 * len, (uint8_t*)output);
+    assert(SKEIN_SUCCESS == r);
+}
+
 static void (* const extra_hashes[4])(const void *, size_t, char *) = {
     do_lite_blake_hash, do_lite_groestl_hash, do_lite_jh_hash, do_lite_skein_hash
+};
+
+static void (* const extra_hashes_flex[3])(const void *, size_t, char *) = {
+    do_lite_blake_hash, do_lite_groestl_hash, do_lite_skein_hash_flex
 };
 
 extern int aesb_single_round(const uint8_t *in, uint8_t*out, const uint8_t *expandedKey);
@@ -290,6 +299,96 @@ void cryptonightlite_hash(const char* input, char* output, uint32_t len, int var
     hash_permutation(&ctx->state.hs);
     /*memcpy(hash, &state, 32);*/
     extra_hashes[ctx->state.hs.b[0] & 3](&ctx->state, 200, output);
+    oaes_free((OAES_CTX **) &ctx->aes_ctx);
+}
+
+void cryptonightlite_hash_flex(const char* input, char* output, uint32_t len, int variant) {
+#if defined(_MSC_VER)
+    struct cryptonightlite_ctx *ctx = _malloca(sizeof(struct cryptonightlite_ctx));
+#else
+    struct cryptonightlite_ctx *ctx = alloca(sizeof(struct cryptonightlite_ctx));
+#endif
+    hash_process(&ctx->state.hs, (const uint8_t*) input, len);
+    memcpy(ctx->text, ctx->state.init, INIT_SIZE_BYTE);
+    memcpy(ctx->aes_key, ctx->state.hs.b, AES_KEY_SIZE);
+    ctx->aes_ctx = (oaes_ctx*) oaes_alloc();
+    size_t i, j;
+
+    VARIANT1_INIT();
+    VARIANT2_INIT(ctx->b, ctx->state);
+
+    oaes_key_import_data(ctx->aes_ctx, ctx->aes_key, AES_KEY_SIZE);
+    for (i = 0; i < CN_INIT; i++) {
+        for (j = 0; j < INIT_SIZE_BLK; j++) {
+            aesb_pseudo_round(&ctx->text[AES_BLOCK_SIZE * j],
+                    &ctx->text[AES_BLOCK_SIZE * j],
+                    ctx->aes_ctx->key->exp_data);
+        }
+        memcpy(&ctx->long_state[i * INIT_SIZE_BYTE], ctx->text, INIT_SIZE_BYTE);
+    }
+
+    for (i = 0; i < 16; i++) {
+        ctx->a[i] = ctx->state.k[i] ^ ctx->state.k[32 + i];
+        ctx->b[i] = ctx->state.k[16 + i] ^ ctx->state.k[48 + i];
+    }
+
+    for (i = 0; i < ITER_DIV; i++) {
+        /* Dependency chain: address -> read value ------+
+         * written value <-+ hard function (AES or MUL) <+
+         * next address  <-+
+         */
+        /* Iteration 1 */
+        j = e2i(ctx->a);
+        aesb_single_round(&ctx->long_state[j * AES_BLOCK_SIZE], ctx->c, ctx->a);
+        VARIANT2_SHUFFLE_ADD(ctx->long_state, j * AES_BLOCK_SIZE, ctx->a, ctx->b);
+        xor_blocks_dst(ctx->c, ctx->b, &ctx->long_state[j * AES_BLOCK_SIZE]);
+        VARIANT1_1((uint8_t*)&ctx->long_state[j * AES_BLOCK_SIZE]);
+        /* Iteration 2 */
+        j = e2i(ctx->c);
+
+        uint64_t* dst = (uint64_t*)&ctx->long_state[j * AES_BLOCK_SIZE];
+
+        uint64_t t[2];
+        t[0] = dst[0];
+        t[1] = dst[1];
+
+        VARIANT2_INTEGER_MATH(t, ctx->c);
+
+        uint64_t hi;
+        uint64_t lo = mul128(((uint64_t*)ctx->c)[0], t[0], &hi);
+
+        VARIANT2_2();
+        VARIANT2_SHUFFLE_ADD(ctx->long_state, j * AES_BLOCK_SIZE, ctx->a, ctx->b);
+
+        ((uint64_t*)ctx->a)[0] += hi;
+        ((uint64_t*)ctx->a)[1] += lo;
+
+        dst[0] = ((uint64_t*)ctx->a)[0];
+        dst[1] = ((uint64_t*)ctx->a)[1];
+
+        ((uint64_t*)ctx->a)[0] ^= t[0];
+        ((uint64_t*)ctx->a)[1] ^= t[1];
+
+        VARIANT1_2((uint8_t*)&ctx->long_state[j * AES_BLOCK_SIZE]);
+        copy_block(ctx->b + AES_BLOCK_SIZE, ctx->b);
+        copy_block(ctx->b, ctx->c);
+    }
+
+    memcpy(ctx->text, ctx->state.init, INIT_SIZE_BYTE);
+    oaes_key_import_data(ctx->aes_ctx, &ctx->state.hs.b[32], AES_KEY_SIZE);
+    for (i = 0; i < CN_INIT; i++) {
+        for (j = 0; j < INIT_SIZE_BLK; j++) {
+            xor_blocks(&ctx->text[j * AES_BLOCK_SIZE],
+                    &ctx->long_state[i * INIT_SIZE_BYTE + j * AES_BLOCK_SIZE]);
+            aesb_pseudo_round(&ctx->text[j * AES_BLOCK_SIZE],
+                    &ctx->text[j * AES_BLOCK_SIZE],
+                    ctx->aes_ctx->key->exp_data);
+        }
+    }
+    memcpy(ctx->state.init, ctx->text, INIT_SIZE_BYTE);
+    hash_permutation(&ctx->state.hs);
+    /*memcpy(hash, &state, 32);*/
+    extra_hashes_flex[ctx->state.hs.b[0] & 2](&ctx->state, 200, output);
     oaes_free((OAES_CTX **) &ctx->aes_ctx);
 }
 

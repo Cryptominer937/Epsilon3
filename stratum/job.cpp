@@ -1,8 +1,7 @@
 
 #include "stratum.h"
 
-//client->difficulty_remote = 0;
-//debuglog(" returning %x, %s, %s\n", job->id, client->sock->ip, #condition); \
+#define MAX_JOBAGE 120;
 
 #define RETURN_ON_CONDITION(condition, ret) \
 	if(condition) \
@@ -14,14 +13,33 @@ static bool job_assign_client(YAAMP_JOB *job, YAAMP_CLIENT *client, double maxha
 {
 	RETURN_ON_CONDITION(client->deleted, true);
 	RETURN_ON_CONDITION(client->jobid_next, true);
+	RETURN_ON_CONDITION(job->coind->mining_disabled, true);
 	RETURN_ON_CONDITION(client->jobid_locked && client->jobid_locked != job->id, true);
 	RETURN_ON_CONDITION(client_find_job_history(client, job->id), true);
 	RETURN_ON_CONDITION(maxhash > 0 && job->speed + client->speed > maxhash, true);
+
+	bool specific_mining = (client->coins_mining_list.size() > 0 );
+	bool coin_to_mine = (std::find(client->coins_mining_list.begin(), client->coins_mining_list.end(), job->coind->symbol) != client->coins_mining_list.end()) ||
+						(std::find(client->coins_mining_list.begin(), client->coins_mining_list.end(), job->coind->symbol2) != client->coins_mining_list.end());
+	bool coin_to_ignore = (std::find(client->coins_ignore_list.begin(), client->coins_ignore_list.end(), job->coind->symbol) != client->coins_ignore_list.end()) ||
+						  (std::find(client->coins_ignore_list.begin(), client->coins_ignore_list.end(), job->coind->symbol2) != client->coins_ignore_list.end());
 
 	if(!g_autoexchange && maxhash >= 0. && client->coinid != job->coind->id) {
 		//debuglog("prevent client %c on %s, not the right coin\n",
 		//	client->username[0], job->coind->symbol);
 		return true;
+	}
+
+	if (coin_to_ignore) {
+		return true;
+	}
+
+	if ((!job->coind->auto_exchange) && (!coin_to_mine)) {
+		return true;
+	}
+
+	if ( maxhash >= 0. ) {
+		if (( specific_mining ) && (!coin_to_mine)) return true;
 	}
 
 	if(job->remote)
@@ -206,11 +224,23 @@ void job_assign_clients_left(double factor)
 		for(CLI li = g_list_client.first; li; li = li->next)
 		{
 			YAAMP_CLIENT *client = (YAAMP_CLIENT *)li->data;
+			bool coin_to_mine = (std::find(client->coins_mining_list.begin(), client->coins_mining_list.end(), coind->symbol) != client->coins_mining_list.end()) ||
+								(std::find(client->coins_mining_list.begin(), client->coins_mining_list.end(), coind->symbol2) != client->coins_mining_list.end());
+			bool coin_to_ignore = (std::find(client->coins_ignore_list.begin(), client->coins_ignore_list.end(), coind->symbol) != client->coins_ignore_list.end()) ||
+								  (std::find(client->coins_ignore_list.begin(), client->coins_ignore_list.end(), coind->symbol2) != client->coins_ignore_list.end());
+
 			if (!g_autoexchange) {
 				if (client->coinid == coind->id)
 					factor = 100.;
 				else
 					factor = 0.;
+			}
+			else if ((!(coind->auto_exchange)) && (!coin_to_mine)) {
+				factor = 0.;
+			}
+
+			if (coin_to_ignore) {
+				factor = 0.;
 			}
 
 			//debuglog("%s %s factor %f nethash %.3f\n", coind->symbol, client->username, factor, nethash);
@@ -225,6 +255,51 @@ void job_assign_clients_left(double factor)
 	}
 }
 
+void job_check_status() {
+
+	time_t tmpjobage;
+
+	g_list_job.Enter();
+
+	for(CLI li = g_list_job.first; li; li = li->next) {
+		YAAMP_JOB *job = (YAAMP_JOB *)li->data;
+		if (!job) continue;
+
+		/*
+		debuglog("job %i from coin %s templ->height %i coin->height %i status %i isdelete %i\n",
+				job->id,
+				(job->coind)?job->coind->symbol:"NULL",
+				(job->templ)?job->templ->height:0,
+				(job->coind)?job->coind->height:0,
+				job->status,
+				job->deleted);
+*/
+		// check status
+		if (job->status != JOB_STATUS_WAITING) { continue; }
+
+		// todo: add timeout for jobs
+		if (!job->templ) { job->deleted = true; continue; }
+		if (!job->coind) { job->deleted = true; continue; }
+
+		tmpjobage = time(NULL) - MAX_JOBAGE;
+		if (job->jobage <= tmpjobage) {
+//			debuglog("delete timeouted job %i from coin %s height %i\n",
+//					job->id, job->coind->symbol, job->templ->height);
+			job->deleted = true;
+			continue;
+		}
+
+
+		if (job->templ->height <= job->coind->height) {
+//			debuglog("delete job %i from coin %s height %i\n",
+//					job->id, job->coind->symbol, job->templ->height);
+			job->deleted = true;
+			continue;
+		}
+
+	}
+	g_list_job.Leave();
+}
 ////////////////////////////////////////////////////////////////////////
 
 pthread_mutex_t g_job_mutex;
@@ -238,6 +313,7 @@ void *job_thread(void *p)
 		job_update();
 		pthread_cond_wait(&g_job_cond, &g_job_mutex);
 	}
+	return (void*)0;
 }
 
 void job_init()
@@ -341,10 +417,24 @@ void job_update()
 
 }
 
+void job_log_statistic()
+{
+	int count_locked_deleted = 0;
+	g_list_job.Enter();
 
+	for(CLI li = g_list_job.first; li; li = li->next)
+	{
+		YAAMP_JOB *job = (YAAMP_JOB *)li->data;
+		if (!job) continue;
 
+		if ((job->deleted) && (job->lock_count)) {
+			count_locked_deleted++;
+			job->lock_count = 0;
+		}
+	}
 
+	if (count_locked_deleted > 0)
+		debuglog("job_log_statistic %d orphan jobs\n", count_locked_deleted);
+	g_list_job.Leave();
 
-
-
-
+}

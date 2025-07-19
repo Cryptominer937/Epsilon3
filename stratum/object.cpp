@@ -1,6 +1,26 @@
 
 #include "stratum.h"
 
+/*  annoying bug in thread handling
+ 	original dev didn't notice that list implementation only protects list pointers,
+	not the content of the list elements.
+	leads to memory leakage on heavy load and stratum gets real slow as internal lists gets too large
+*/
+YAAMP_OBJECT::YAAMP_OBJECT()
+{
+	yaamp_create_mutex(&object_mutex);
+
+	id = 0;
+	lock_count = 0;
+
+	unlock = false;
+	deleted = false;
+}
+
+YAAMP_OBJECT::~YAAMP_OBJECT()
+{
+	// nothing
+}
 YAAMP_OBJECT *object_find(CommonList *list, int id, bool lock)
 {
 	if(lock) list->Enter();
@@ -26,19 +46,27 @@ YAAMP_OBJECT *object_find(CommonList *list, int id, bool lock)
 void object_lock(YAAMP_OBJECT *object)
 {
 	if(!object) return;
+	CommonLock(&object->object_mutex);
 	object->lock_count++;
+	CommonUnlock(&object->object_mutex);
 }
 
 void object_unlock(YAAMP_OBJECT *object)
 {
 	if(!object) return;
+	CommonLock(&object->object_mutex);
 	object->lock_count--;
+	if (object->lock_count < 0)
+		debuglog("object lockcount negative!");
+	CommonUnlock(&object->object_mutex);
 }
 
 void object_delete(YAAMP_OBJECT *object)
 {
 	if(!object) return;
+	CommonLock(&object->object_mutex);
 	object->deleted = true;
+	CommonUnlock(&object->object_mutex);
 }
 
 void object_prune(CommonList *list, YAAMP_OBJECT_DELETE_FUNC deletefunc)

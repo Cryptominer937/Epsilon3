@@ -5,29 +5,53 @@ void coind_getauxblock(YAAMP_COIND *coind)
 {
 	if(!coind->isaux) return;
 
-	json_value *json = rpc_call(&coind->rpc, "getauxblock", "[]");
-	if(!json)
-	{
-		coind_error(coind, "coind_getauxblock");
-		return;
+	json_value *json = NULL;
+	if((strcmp(coind->symbol, "XMY") == 0) ||
+	   (strcmp(coind->symbol2, "XMY") == 0) ||
+       (strcmp(coind->symbol, "QBC") == 0) ||
+       (strcmp(coind->symbol2, "QBC") == 0) ||
+	   (strcmp(coind->symbol, "EAC") == 0)) {
+		static char wallet_address[1028];
+		if (coind->wallet) sprintf(wallet_address, "[\"%s\"]", coind->wallet);
+
+		json = rpc_call(&coind->rpc, "createauxblock", wallet_address, coind);
+		if(!json)
+		{
+			coind_error(coind, "coind_createauxblock");
+			return;
+		}
+	}
+	else {
+		json = rpc_call(&coind->rpc, "getauxblock", "[]", coind);
+		if(!json)
+		{
+			coind_error(coind, "coind_getauxblock");
+			return;
+		}
 	}
 
 	json_value *json_result = json_get_object(json, "result");
 	if(!json_result)
 	{
+		json_value_free(json);
 		coind_error(coind, "coind_getauxblock");
 		return;
 	}
 
+	CommonLock(&coind->aux_mutex);
 //	coind->aux.height = coind->height+1;
 	coind->aux.chainid = json_get_int(json_result, "chainid");
 
 	const char *p = json_get_string(json_result, "target");
+	if (!p) p = json_get_string(json_result, "_target");
 	if(p) strcpy(coind->aux.target, p);
 
 	p = json_get_string(json_result, "hash");
 	if(p) strcpy(coind->aux.hash, p);
 
+	coind->aux.skip_submitblock = json_get_bool(json_result, "mining_disabled");
+
+	CommonUnlock(&coind->aux_mutex);
 //	if(strcmp(coind->symbol, "UNO") == 0)
 //	{
 //		string_be1(coind->aux.target);
@@ -233,11 +257,32 @@ YAAMP_JOB_TEMPLATE *coind_create_template(YAAMP_COIND *coind)
 	if(coind->usememorypool)
 		return coind_create_template_memorypool(coind);
 
-	char params[512] = "[{}]";
+	char params[512];
+	memset(params, 0, sizeof(params));
+
+	if (is_firopow) {
+		sprintf(params, "[{\"mode\":\"template\"},\"%s\"]", coind->wallet);
+	}
+	else if (is_kawpow) {
+		sprintf(params, "[]");
+	}
+	else {
+		strcpy(params, "[{}]");
+	}
+
 	if(!strcmp(coind->symbol, "PPC")) strcpy(params, "[]");
 	else if(g_stratum_segwit) strcpy(params, "[{\"rules\":[\"segwit\"]}]");
+       
+	coind->usemweb |= g_stratum_mweb;
 
-	json_value *json = rpc_call(&coind->rpc, "getblocktemplate", params);
+       if(coind->usemweb) 
+       {
+       strcpy(params, "[{\"rules\":[\"segwit\",\"mweb\"]}]");
+       debuglog("%s mweb enabled\n", coind->symbol);
+       } 
+
+
+	json_value *json = rpc_call(&coind->rpc, "getblocktemplate", params, coind);
 	if(!json || json_is_null(json))
 	{
 		// coind_error() reset auto_ready, and DCR gbt can fail
@@ -261,16 +306,19 @@ YAAMP_JOB_TEMPLATE *coind_create_template(YAAMP_COIND *coind)
 	if(json_rules && !strlen(coind->witness_magic) && json_rules->u.array.length) {
 		for (int i=0; i<json_rules->u.array.length; i++) {
 			json_value *val = json_rules->u.array.values[i];
-			if(!strcmp(val->u.string.ptr, "segwit")) {
+			if((!strcmp(val->u.string.ptr, "segwit")) || (coind->p2wpkh)) {
 				const char *commitment = json_get_string(json_result, "default_witness_commitment");
 				strcpy(coind->witness_magic, "aa21a9ed");
 				if (commitment && strlen(commitment) > 12) {
 					strncpy(coind->witness_magic, &commitment[4], 8);
 					coind->witness_magic[8] = '\0';
 				}
+				coind->usesegwit |= coind->p2wpkh;
 				coind->usesegwit |= g_stratum_segwit;
+				
 				if (coind->usesegwit)
 					debuglog("%s segwit enabled, magic %s\n", coind->symbol, coind->witness_magic);
+
 				break;
 			}
 		}
@@ -292,6 +340,24 @@ YAAMP_JOB_TEMPLATE *coind_create_template(YAAMP_COIND *coind)
 		return NULL;
 	}
 
+	json_value *json_blocksubsidy = NULL; json_value *json_blocksubsidy_result = NULL;
+	if (strcmp(coind->rpcencoding, "ZEC") == 0) {
+		json_blocksubsidy = rpc_call(&coind->rpc, "getblocksubsidy", "[]", coind);
+		if(!json_blocksubsidy || json_is_null(json_blocksubsidy)) {
+			coind_error(coind, "getblocksubsidy");
+			return NULL;
+		}
+
+		json_blocksubsidy_result = json_get_object(json_blocksubsidy, "result");
+		if(!json_blocksubsidy_result || json_is_null(json_blocksubsidy_result))
+		{
+			coind_error(coind, "getblocksubsidy result");
+			json_value_free(json_blocksubsidy);
+			return NULL;
+		}
+
+	}
+
 	YAAMP_JOB_TEMPLATE *templ = new YAAMP_JOB_TEMPLATE;
 	memset(templ, 0, sizeof(YAAMP_JOB_TEMPLATE));
 
@@ -301,6 +367,16 @@ YAAMP_JOB_TEMPLATE *coind_create_template(YAAMP_COIND *coind)
 	sprintf(templ->version, "%08x", (unsigned int)json_get_int(json_result, "version"));
 	sprintf(templ->ntime, "%08x", (unsigned int)json_get_int(json_result, "curtime"));
 
+	if (strcmp(coind->rpcencoding, "ZEC") == 0) {
+		const double miner_reward = json_get_double(json_blocksubsidy_result, "miner");
+		if (miner_reward != 0.) {
+			templ->value = miner_reward * 100000000;
+			coind->reward = miner_reward;
+		}
+	}
+
+	json_value_free(json_blocksubsidy);
+
 	const char *bits = json_get_string(json_result, "bits");
 	strcpy(templ->nbits, bits ? bits : "");
 	const char *prev = json_get_string(json_result, "previousblockhash");
@@ -308,6 +384,29 @@ YAAMP_JOB_TEMPLATE *coind_create_template(YAAMP_COIND *coind)
 	const char *flags = json_get_string(json_coinbaseaux, "flags");
 	strcpy(templ->flags, flags ? flags : "");
 	strcpy(templ->priceinfo, "");
+
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	if (is_firopow) {
+		templ->header_hash = uint256();
+		const char *pprpcheader = json_get_string(json_result, "pprpcheader");
+		templ->header_hash = uint256S(json_get_string(json_result, "pprpcheader"));
+	}
+	
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	
+	// disable coin on next template on gbt-flag
+	coind->mining_disabled = json_get_bool(json_result, "mining_disabled");
+
+	if (coind->mining_disabled) {
+		debuglog("mining disabled for next block on %s\n",coind->symbol);
+	}
+
+	// LTC mw-eb
+	const char *mweb = json_get_string(json_result, "mweb");
+	if (mweb) {
+		strcpy(templ->mweb, mweb);
+	}
 
 	// LBC Claim Tree (with wallet gbt patch)
 	const char *claim = json_get_string(json_result, "claimtrie");
@@ -440,6 +539,8 @@ YAAMP_JOB_TEMPLATE *coind_create_template(YAAMP_COIND *coind)
 		}
 	}
 
+	if (strlen(templ->mweb) > 0) templ->has_segwit_txs = true;
+
 	if (templ->has_filtered_txs) {
 		// coinbasevalue is a total with all tx fees, need to reduce it if some are skipped
 		templ->value -= templ->filtered_txs_fee;
@@ -454,6 +555,9 @@ YAAMP_JOB_TEMPLATE *coind_create_template(YAAMP_COIND *coind)
 		templ->txsteps = merkle_steps(txhashes);
 	}
 
+	// to fix:  filtered_txs can not be used with segwit coins as filtering txs from template corrupts
+	//			the witness hash tree in given witness commitment by gbt
+	templ->has_segwit_txs |= coind->p2wpkh;
 	if(templ->has_segwit_txs) {
 		// * We compute the witness hash (which is the hash including witnesses) of all the block's transactions, except the
 		//   coinbase (where 0x0000....0000 is used instead).
@@ -506,6 +610,37 @@ YAAMP_JOB_TEMPLATE *coind_create_template(YAAMP_COIND *coind)
 	coinbase_create(coind, templ, json_result);
 	json_value_free(json);
 
+	bool is_equihash = (strstr(g_current_algo->name, "equihash") == g_current_algo->name);
+
+	// create coinbase-string and merkleroot-string
+	int coinbase_len = strlen(templ->coinbase);
+	if (coinbase_len == 0) {
+		sprintf(templ->coinbase, "%s%s%s", templ->coinb1, (is_equihash?"":"0000000000000000"), templ->coinb2);
+		coinbase_len = strlen(templ->coinbase);
+	}
+
+	unsigned char coinbase_bin[1024];
+	memset(coinbase_bin, 0, 1024);
+	binlify(coinbase_bin, templ->coinbase);
+
+	char doublehash[128]; memset(doublehash, 0, 128);
+
+	YAAMP_HASH_FUNCTION merkle_hash = sha256_double_hash_hex;
+//		if (g_current_algo->merkle_func)
+//			merkle_hash = g_current_algo->merkle_func;
+	merkle_hash((char *)coinbase_bin, doublehash, coinbase_len/2);
+
+	string merkleroot = merkle_with_first(templ->txsteps, doublehash);
+	strcpy(templ->merkleroot, merkleroot.c_str());
+
+	if (is_kawpow || is_firopow) {
+		update_epoch(coind->id, templ->height);
+		templ->header_seed = get_kawpow_seed(templ->height);
+		if (is_kawpow) {
+			templ->header_hash = build_header_hash(templ);
+		}
+	}
+
 	return templ;
 }
 
@@ -544,6 +679,12 @@ bool coind_create_job(YAAMP_COIND *coind, bool force)
 		strcmp(templ->coinb2, job_last->templ->coinb2) == 0)
 	{
 //		debuglog("coind_create_job %s %d same template %x \n", coind->name, coind->height, coind->job->id);
+		for(int i=0; i<templ->auxs_size; i++) {
+			if (templ->auxs[i]) {
+				free(templ->auxs[i]); templ->auxs[i] = NULL;
+			}
+		}
+
 		if (templ->txcount) {
 			templ->txsteps.clear();
 			templ->txdata.clear();
@@ -571,9 +712,11 @@ bool coind_create_job(YAAMP_COIND *coind, bool force)
 			stratumlog("%s %d not reporting\n", coind->name, coind->height);
 	}
 
-	uint64_t coin_target = decode_compact(templ->nbits);
+	bool is_equihash = (strstr(g_current_algo->name, "equihash") == g_current_algo->name);
+	uint64_t coin_target = decode_compact(templ->nbits, (is_equihash)? 19 : 25);
+
 	if (templ->nbits && !coin_target) coin_target = 0xFFFF000000000000ULL; // under decode_compact min diff
-	coind->difficulty = target_to_diff(coin_target);
+	coind->difficulty = target_to_diff_coin(coin_target, coind->powlimit_bits - ((is_equihash)? 0 : 16));
 
 //	stratumlog("%s %d diff %g %llx %s\n", coind->name, height, coind->difficulty, coin_target, templ->nbits);
 
@@ -581,10 +724,18 @@ bool coind_create_job(YAAMP_COIND *coind, bool force)
 
 	////////////////////////////////////////////////////////////////////////////////////////
 
-	object_delete(coind->job);
+	if (job_last && job_last->templ && (templ->height == job_last->templ->height)) {
+		if (coind->job) coind->job->status = JOB_STATUS_WAITING;
+	}
+	else {
+		object_delete(coind->job);
+	}
 
 	coind->job = new YAAMP_JOB;
 	memset(coind->job, 0, sizeof(YAAMP_JOB));
+
+	coind->job->status = JOB_STATUS_ACTIVE;
+	coind->job->jobage = time(NULL);
 
 	sprintf(coind->job->name, "%s", coind->symbol);
 
@@ -592,8 +743,9 @@ bool coind_create_job(YAAMP_COIND *coind, bool force)
 	coind->job->templ = templ;
 
 	coind->job->profit = coind_profitability(coind);
-	coind->job->maxspeed = coind_nethash(coind) *
-		(g_current_algo->profit? min(1.0, coind_profitability(coind)/g_current_algo->profit): 1);
+//	coind->job->maxspeed = coind_nethash(coind) *
+//		(g_current_algo->profit? min(1.0, coind_profitability(coind)/g_current_algo->profit): 1);
+	coind->job->maxspeed = coind_nethash(coind);
 
 	coind->job->coind = coind;
 	coind->job->remote = NULL;
@@ -605,18 +757,3 @@ bool coind_create_job(YAAMP_COIND *coind, bool force)
 
 	return true;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

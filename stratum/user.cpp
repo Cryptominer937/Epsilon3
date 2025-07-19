@@ -16,11 +16,11 @@ void db_check_coin_symbol(YAAMP_DB *db, char* symbol)
 	if (!symbol) return;
 	size_t len = strlen(symbol);
 	if (len >= 2 && len <= 12) {
-#ifdef NO_EXCHANGE
-		db_query(db, "SELECT symbol FROM coins WHERE installed AND algo='%s' AND symbol='%s'", g_stratum_algo, symbol);
-#else
-		db_query(db, "SELECT symbol FROM coins WHERE installed AND (symbol='%s' OR symbol2='%s')", symbol, symbol);
-#endif
+		if (!g_autoexchange)
+			db_query(db, "SELECT symbol FROM coins WHERE installed AND algo='%s' AND symbol='%s'", g_stratum_algo, symbol);
+		else
+			db_query(db, "SELECT symbol FROM coins WHERE installed AND (symbol='%s' OR symbol2='%s')", symbol, symbol);
+
 		MYSQL_RES *result = mysql_store_result(&db->mysql);
 		*symbol = '\0';
 		if (!result) return;
@@ -42,21 +42,49 @@ void db_add_user(YAAMP_DB *db, YAAMP_CLIENT *client)
 	db_clean_string(db, client->notify_id);
 	db_clean_string(db, client->worker);
 
-	char symbol[16] = { 0 };
-	char *p = strstr(client->password, "c=");
-	if(!p) p = strstr(client->password, "s=");
-	if(p) strncpy(symbol, p+2, 15);
-	p = strchr(symbol, ',');
-	if(p) *p = '\0';
-
 	bool guest = false;
 	int gift = -1;
+	client->solo = false;
+
+	std::string symbol;
+	std::vector<std::string> commandlist;
+	std::string passwordstring(client->password);
+
+	string_tokenize(passwordstring, ',' , commandlist);
+
+	for (auto &command_pairs: commandlist) {
+		std::vector<std::string> command;
+		string_tokenize(command_pairs, '=', command);
+
+		if (command.size() > 1) {
+			// set payout symbol
+			if (command.at(0) == "c") {
+				symbol = command.at(1);
+			}
+			else if (command.at(0) == "s") {
+				symbol = command.at(1);
+			}
+			else if (command.at(0) == "m") {
+				if (command.at(1) == "solo") client->solo = true;
+			}
+			// set list of specific coins to mine only
+			else if (command.at(0) == "mc") {
+				string_tokenize(command.at(1), '/', client->coins_mining_list);
+			}
+			// set list of specific coins to skip in selection
+			else if (command.at(0) == "nc") {
+				string_tokenize(command.at(1), '/', client->coins_ignore_list);
+			}
 #ifdef ALLOW_CUSTOM_DONATIONS
-	// donation percent
-	p = strstr(client->password, "g=");
-	if(p) gift = atoi(p+2);
-	if(gift > 100) gift = 100;
+			else if (command.at(0) == "g") {
+				gift = atoi(command.at(1).c_str());
+				if(gift > 100) gift = 100;
+			}
 #endif
+
+		}
+
+	}
 
 	db_check_user_input(client->username);
 	if(strlen(client->username) < MIN_ADDRESS_LEN) {
@@ -97,8 +125,8 @@ void db_add_user(YAAMP_DB *db, YAAMP_CLIENT *client)
 
 	mysql_free_result(result);
 
-	db_check_user_input(symbol);
-	db_check_coin_symbol(db, symbol);
+	db_check_user_input((char*)symbol.substr(0,15).c_str());
+	db_check_coin_symbol(db, (char*)symbol.substr(0,15).c_str());
 
 	if (gift < 0) gift = 0;
 	client->donation = gift;
@@ -109,7 +137,7 @@ void db_add_user(YAAMP_DB *db, YAAMP_CLIENT *client)
 	else if(client->userid == 0 && strlen(client->username) >= MIN_ADDRESS_LEN)
 	{
 		db_query(db, "INSERT INTO accounts (username, coinsymbol, balance, donation, hostaddr) values ('%s', '%s', 0, %d, '%s')",
-			client->username, symbol, gift, client->sock->ip);
+			client->username, symbol.substr(0,15).c_str(), gift, client->sock->ip);
 		client->userid = (int)mysql_insert_id(&db->mysql);
 	}
 
@@ -117,10 +145,10 @@ void db_add_user(YAAMP_DB *db, YAAMP_CLIENT *client)
 		db_query(db, "UPDATE accounts SET coinsymbol='%s', swap_time=%u, donation=%d, hostaddr='%s' WHERE id=%d AND balance = 0"
 			" AND (SELECT COUNT(id) FROM payouts WHERE account_id=%d AND tx IS NULL) = 0" // failed balance
 			" AND (SELECT pending FROM balanceuser WHERE userid=%d ORDER by time DESC LIMIT 1) = 0" // pending balance
-			, symbol, (uint) time(NULL), gift, client->sock->ip, client->userid, client->userid, client->userid);
-		if (mysql_affected_rows(&db->mysql) > 0 && strlen(symbol)) {
+			, symbol.substr(0,15).c_str(), (uint) time(NULL), gift, client->sock->ip, client->userid, client->userid, client->userid);
+		if (mysql_affected_rows(&db->mysql) > 0 && (symbol.size() > 0)) {
 			debuglog("%s: %s coinsymbol set to %s ip %s uid (%d)\n",
-				g_current_algo->name, client->username, symbol, client->sock->ip, client->userid);
+				g_current_algo->name, client->username, symbol.substr(0,15).c_str(), client->sock->ip, client->userid);
 		}
 	}
 }
@@ -179,7 +207,7 @@ void db_update_workers(YAAMP_DB *db)
 		if(client->deleted) continue;
 		if(!client->workerid) continue;
 
-		if(client->speed < 0.00001)
+		if(client->speed < YAAMP_CLIENT_MINSPEED)
 		{
 			clientlog(client, "speed %f", client->speed);
 			shutdown(client->sock->sock, SHUT_RDWR);

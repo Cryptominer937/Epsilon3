@@ -5,7 +5,7 @@ bool client_suggest_difficulty(YAAMP_CLIENT *client, json_value *json_params)
 {
 	if(json_params->u.array.length>0)
 	{
-		double diff = client_normalize_difficulty(json_params->u.array.values[0]->u.dbl);
+		double diff = client_normalize_difficulty(json_params->u.array.values[0]->u.dbl, client);
 		uint64_t user_target = diff_to_target(diff);
 
 		if(user_target >= YAAMP_MINDIFF && user_target <= YAAMP_MAXDIFF)
@@ -25,9 +25,13 @@ bool client_suggest_target(YAAMP_CLIENT *client, json_value *json_params)
 bool client_subscribe(YAAMP_CLIENT *client, json_value *json_params)
 {
 	//if(client_find_my_ip(client->sock->ip)) return false;
-	get_next_extraonce1(client->extranonce1_default);
+	if (is_kawpow || is_firopow)
+		get_nonce_prefix(client->extranonce1_default);
+	else
+		get_next_extraonce1(client->extranonce1_default);
 
-	client->extranonce2size_default = YAAMP_EXTRANONCE2_SIZE;
+	if(!strcmp(g_stratum_algo,"neoscrypt-xaya")) client->extranonce2size_default = 2;
+	else client->extranonce2size_default = YAAMP_EXTRANONCE2_SIZE;
 	client->difficulty_actual = g_stratum_difficulty;
 
 	strcpy(client->extranonce1, client->extranonce1_default);
@@ -48,8 +52,10 @@ bool client_subscribe(YAAMP_CLIENT *client, json_value *json_params)
 		if (json_params->u.array.values[0]->u.string.ptr)
 			strncpy(client->version, json_params->u.array.values[0]->u.string.ptr, 1023);
 
-		if (strstr(client->version, "NiceHash"))
-      client->difficulty_actual = g_stratum_nicehash_difficulty;
+		if (strstr(client->version, "NiceHash")) {
+			client->is_nicehash = true;
+			client->difficulty_actual = g_stratum_nicehash_difficulty;
+		}
 
 		if(strstr(client->version, "proxy") || strstr(client->version, "/3."))
       client->reconnectable = false;
@@ -121,8 +127,17 @@ bool client_subscribe(YAAMP_CLIENT *client, json_value *json_params)
 		debuglog("new client with nonce %s\n", client->extranonce1);
 	}
 
-	client_send_result(client, "[[[\"mining.set_difficulty\",\"%.3g\"],[\"mining.notify\",\"%s\"]],\"%s\",%d]",
-		client->difficulty_actual, client->notify_id, client->extranonce1, client->extranonce2size);
+	if (is_kawpow || is_firopow) {
+		kawpow_send_nonceprefix(client);
+	}
+	else if (strstr(g_current_algo->name, "equihash") == g_current_algo->name) {
+		// send extranonce
+		client_send_result(	client, "[null,\"%s\"]",client->extranonce1);
+	}
+	else {
+		client_send_result(client, "[[[\"mining.set_difficulty\",\"%.3g\"],[\"mining.notify\",\"%s\"]],\"%s\",%d]",
+			client->difficulty_actual, client->notify_id, client->extranonce1, client->extranonce2size);
+	}
 
 	return true;
 }
@@ -333,13 +348,21 @@ bool client_update_block(YAAMP_CLIENT *client, json_value *json_params)
 	coind_create_job(coind);
 	object_unlock(coind);
 
-	if(coind->isaux) for(CLI li = g_list_coind.first; li; li = li->next)
+	if(coind->isaux)
 	{
-		YAAMP_COIND *coind = (YAAMP_COIND *)li->data;
-		if(!coind_can_mine(coind)) continue;
-		if(coind->pos) continue;
+		/*  only update job for DOGE ,
+			other coins ignore intermediate updates to avoid fast job re-issue	*/
+		if (strcmp(coind->symbol, "DOGE") == 0)
+		{
+			for(CLI li = g_list_coind.first; li; li = li->next)
+			{
+				YAAMP_COIND *coind = (YAAMP_COIND *)li->data;
+				if(!coind_can_mine(coind)) continue;
+				if(coind->pos) continue;
 
-		coind_create_job(coind);
+				coind_create_job(coind);
+			}
+		}
 	}
 
 	job_signal();
@@ -531,7 +554,7 @@ void *client_thread(void *p)
 	memset(client, 0, sizeof(YAAMP_CLIENT));
 
 	client->reconnectable = true;
-	client->speed = 1;
+	client->speed = YAAMP_CLIENT_MINSPEED * 10;
 	client->created = time(NULL);
 	client->last_best = time(NULL);
 
@@ -617,7 +640,7 @@ void *client_thread(void *p)
 			b = client_send_result(client, "[]");
 
 		else if(!strcmp(method, "mining.configure"))
-			b = client_send_result(client, "false"); // ASICBOOST
+			b = client_configure(client, json_params); // ASICBOOST
 
 		else if(!strcmp(method, "mining.extranonce.subscribe"))
 		{
@@ -632,6 +655,11 @@ void *client_thread(void *p)
 		{
 			clientlog(client, "using getwork"); // client using http:// url
 		}
+		else if(!strcmp(method, "eth_submitHashrate"))
+		{
+			b = client_send_result(client, "true"); // skip eth_submitHashrate method
+		}
+
 		else
 		{
 			b = client_send_error(client, 20, "Not supported");
@@ -670,9 +698,44 @@ void *client_thread(void *p)
 		object_delete(client);
 	} else {
 		// only clients sockets in g_list_client are purged (if marked deleted)
-		socket_close(client->sock);
-		delete client;
+		client_delete(client);
 	}
 
 	pthread_exit(NULL);
+}
+
+/*
+	simple implementaion of asicboost of stratum protocol
+	full spec: https://github.com/slushpool/stratumprotocol/blob/master/stratum-extensions.mediawiki
+*/
+bool client_configure(YAAMP_CLIENT *client, json_value *json_params)
+{
+	uint32_t version_mask = 0x1fffe000;
+	bool version_rolling_enabled = false;
+
+    if(json_params->u.array.length>1 && json_is_array(json_params->u.array.values[0]) && json_is_object(json_params->u.array.values[1]))
+	{
+		for (int index_array=0; index_array < json_params->u.array.values[0]->u.array.length; ++index_array) {
+			if (json_is_string(json_params->u.array.values[0]->u.array.values[index_array]) && 
+				!strcmp(json_params->u.array.values[0]->u.array.values[index_array]->u.string.ptr, "version-rolling"))
+			{
+				for (int index_object=0; index_object < json_params->u.array.values[1]->u.object.length; ++index_object) {
+					if(!strcmp(json_params->u.array.values[1]->u.object.values[index_object].name, "version-rolling.mask") &&
+						json_is_string(json_params->u.array.values[1]->u.object.values[index_object].value))
+					{
+						version_mask = strtoul(json_params->u.array.values[1]->u.object.values[index_object].value->u.string.ptr, NULL, 16);
+						version_rolling_enabled = true;
+					}
+				}
+			}
+		}
+	}
+
+	if (version_rolling_enabled)
+	{
+		return client_send_result(client, "{\"version-rolling\":true,\"version-rolling.mask\":\"%08x\"}", version_mask);
+	}
+	else {
+		return client_send_result(client, "{\"version-rolling\": false}");
+	}
 }

@@ -2,8 +2,13 @@
 class YAAMP_OBJECT
 {
 public:
+	YAAMP_OBJECT();
+	~YAAMP_OBJECT();
+
+	pthread_mutex_t object_mutex;
+
 	int id;
-	int lock_count;
+	volatile int lock_count;
 
 	bool unlock;
 	bool deleted;

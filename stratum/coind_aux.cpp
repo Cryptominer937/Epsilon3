@@ -31,18 +31,37 @@ void coind_aux_build_auxs(YAAMP_JOB_TEMPLATE *templ)
 			YAAMP_COIND *coind = (YAAMP_COIND *)li->data;
 			if(!coind_can_mine(coind, true)) continue;
 
+			CommonLock(&coind->aux_mutex);
 			int pos = (int)(int64_t)((1103515245 * coind->aux.chainid + 1103515245 * (int64_t)12345 + 12345) % templ->auxs_size);
 			if(templ->auxs[pos])
 			{
+				for(int j=0; j<templ->auxs_size; j++) {
+					if (templ->auxs[j]) {
+						free(templ->auxs[j]); templ->auxs[j] = NULL;
+					}
+				}
+
 				templ->auxs_size = 0;
 				memset(templ->auxs, 0, sizeof(templ->auxs));
 
 				done = false;
+				CommonUnlock(&coind->aux_mutex);
 				break;
 			}
 
 			coind->aux.index = pos;
-			templ->auxs[pos] = &coind->aux;
+			/*
+			 * orig stratum code will only work correctly with 1 single merged aux coin
+			 * building larger aux-chains (mostly on scrypt) are affected by broken merkle trees
+			 * as result of intermediate blockupdates between job-create and submit
+			 * full job state including aux-tree needs to be stored on job structure instead referencing only
+			*/
+			YAAMP_COIND_AUX *new_aux = NULL;
+			new_aux = (YAAMP_COIND_AUX *)malloc(sizeof(YAAMP_COIND_AUX));
+			memcpy(new_aux, &coind->aux, sizeof(YAAMP_COIND_AUX));
+
+			templ->auxs[pos] = new_aux;
+			CommonUnlock(&coind->aux_mutex);
 		}
 
 		if(done) break;

@@ -20,6 +20,7 @@
 #include <errmsg.h>
 #include <ifaddrs.h>
 #include <dirent.h>
+#include <algorithm>
 
 #include <iostream>
 #include <vector>
@@ -29,6 +30,9 @@ using namespace std;
 #include "iniparser/src/iniparser.h"
 
 #include "json.h"
+#include "utilstrencodings.h"
+#include "uint256.h"
+#include "arith_uint256.h"
 #include "util.h"
 
 #define YAAMP_RESTARTDELAY		(24*60*60)
@@ -50,7 +54,9 @@ typedef void (*YAAMP_HASH_FUNCTION)(const char *, char *, uint32_t);
 #define YAAMP_SMALLBUFSIZE		(32*1024)
 
 #define YAAMP_NONCE_SIZE		4
+#define YAAMP_KAWPOW_NONCE_SIZE	8
 #define YAAMP_RES_NONCE_SIZE	(32 - YAAMP_NONCE_SIZE)
+#define YAAMP_EQUIHASH_NONCE_SIZE   28
 #define YAAMP_EXTRANONCE2_SIZE	4
 
 #define YAAMP_HASHLEN_STR		65
@@ -66,6 +72,9 @@ extern CommonList g_list_worker;
 extern CommonList g_list_block;
 extern CommonList g_list_submit;
 extern CommonList g_list_source;
+
+extern bool is_kawpow;
+extern bool is_firopow;
 
 extern int g_tcp_port;
 
@@ -95,11 +104,13 @@ extern int g_stratum_max_ttf;
 extern bool g_stratum_reconnect;
 extern bool g_stratum_renting;
 extern bool g_stratum_segwit;
+extern bool g_stratum_mweb;
 extern int g_limit_txs_per_block;
 
 extern bool g_handle_haproxy_ips;
 extern int g_socket_recv_timeout;
 
+extern char g_log_directory[1024];
 extern bool g_debuglog_client;
 extern bool g_debuglog_hash;
 extern bool g_debuglog_socket;
@@ -110,6 +121,9 @@ extern bool g_debuglog_remote;
 extern uint64_t g_max_shares;
 extern uint64_t g_shares_counter;
 
+extern uint32_t g_equihash_wk;
+extern uint32_t g_equihash_wn;
+
 extern bool g_allow_rolltime;
 extern time_t g_last_broadcasted;
 
@@ -117,6 +131,7 @@ extern struct ifaddrs *g_ifaddr;
 
 extern pthread_mutex_t g_db_mutex;
 extern pthread_mutex_t g_nonce1_mutex;
+extern pthread_mutex_t g_context_mutex;
 extern pthread_mutex_t g_job_create_mutex;
 
 extern volatile bool g_exiting;
@@ -124,12 +139,16 @@ extern volatile bool g_exiting;
 #include "db.h"
 #include "object.h"
 #include "socket.h"
+#include "job.h"
 #include "client.h"
 #include "rpc.h"
-#include "job.h"
 #include "coind.h"
 #include "remote.h"
 #include "share.h"
+#include "kawpow/hash.h"
+#include "kawpow/kawpow.h"
+#include "firopow/hash.h"
+#include "firopow/overrides.h"
 
 extern YAAMP_DB *g_db;
 extern YAAMP_ALGO g_algos[];
@@ -155,6 +174,8 @@ void sha256_double_hash_hex(const char *input, char *output, unsigned int len);
 void sha3d_hash_hex(const char *input, char *output, unsigned int len);
 
 #include "algos/a5a.h"
+#include "algos/aurum.h"
+#include "algos/balloon.h"
 #include "algos/c11.h"
 #include "algos/x11.h"
 #include "algos/x11evo.h"
@@ -171,6 +192,7 @@ void sha3d_hash_hex(const char *input, char *output, unsigned int len);
 #include "algos/x18.h"
 #include "algos/x22i.h"
 #include "algos/xevan.h"
+#include "algos/xelisv2.h"
 #include "algos/hmq17.h"
 #include "algos/nist5.h"
 #include "algos/fresh.h"
@@ -257,3 +279,7 @@ void sha3d_hash_hex(const char *input, char *output, unsigned int len);
 #include "algos/sha3d.h"
 #include "algos/sha256dt.h"
 #include "algos/skydoge.h"
+#include "algos/equihash.h"
+#include "algos/flex.h"
+
+bool validate_hashfunctions();

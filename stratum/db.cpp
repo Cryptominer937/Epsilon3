@@ -3,6 +3,10 @@
 #include <mysql/mysqld_error.h>
 #include <signal.h>
 
+#ifndef ER_LOCK_DEADLOCK
+#define ER_LOCK_DEADLOCK	1213
+#endif
+
 void db_reconnect(YAAMP_DB *db)
 {
 	if (g_exiting) {
@@ -80,6 +84,7 @@ void db_query(YAAMP_DB *db, const char *format, ...)
 	int len = vsprintf(buffer, format, arglist);
 	va_end(arglist);
 
+	int max_retries = 5;
 	while(!g_exiting)
 	{
 		int res = mysql_query(&db->mysql, buffer);
@@ -88,10 +93,16 @@ void db_query(YAAMP_DB *db, const char *format, ...)
 
 		stratumlog("SQL ERROR: %d, %s\n", res, mysql_error(&db->mysql));
 		if(res == ER_DUP_ENTRY) break; // rarely seen on new user creation
-		if(res != CR_SERVER_GONE_ERROR && res != CR_SERVER_LOST) exit(1);
+		if(res != CR_SERVER_GONE_ERROR && res != CR_SERVER_LOST && res != ER_LOCK_DEADLOCK) exit(1);
 
 		usleep(100*YAAMP_MS);
-		db_reconnect(db);
+
+		max_retries--;
+		if (!max_retries) exit(1);
+
+		if ((res == CR_SERVER_GONE_ERROR) || (res == CR_SERVER_LOST)) {
+			db_reconnect(db);
+		}
 	}
 
 	free(buffer);
@@ -140,7 +151,7 @@ void db_update_algos(YAAMP_DB *db)
 
 	///////////////////////////////////////////////////////////////////////////////////////////
 
-	db_query(db, "select name, profit, rent, factor from algos");
+	db_query(db, "select name, profit, rent, factor, speedfactor, powlimit_bits from algos");
 
 	MYSQL_RES *result = mysql_store_result(&db->mysql);
 	if(!result) return;
@@ -154,6 +165,8 @@ void db_update_algos(YAAMP_DB *db)
 		if(row[1]) algo->profit = atof(row[1]);
 		if(row[2]) algo->rent = atof(row[2]);
 		if(row[3]) algo->factor = atof(row[3]);
+		if(row[4]) algo->speedfactor = atof(row[4]);
+		if(row[5]) algo->powlimit_bits = atoi(row[5]);
 	}
 
 	mysql_free_result(result);
@@ -193,7 +206,8 @@ void db_update_coinds(YAAMP_DB *db)
 	db_query(db, "SELECT id, name, rpchost, rpcport, rpcuser, rpcpasswd, rpcencoding, master_wallet, reward, price, "
 		"hassubmitblock, txmessage, enable, auto_ready, algo, pool_ttf, charity_address, charity_amount, charity_percent, "
 		"reward_mul, symbol, auxpow, actual_ttf, network_ttf, usememorypool, hasmasternodes, algo, symbol2, "
-		"rpccurl, rpcssl, rpccert, account, multialgos, max_miners, max_shares, usesegwit "
+		"rpccurl, rpcssl, rpccert, account, multialgos, max_miners, max_shares, usesegwit, "
+		"auto_exchange, enable_rpcdebug, personalization, powlimit_bits, block_time, usemweb "
 		"FROM coins WHERE enable AND auto_ready AND algo='%s' ORDER BY index_avg", g_stratum_algo);
 
 	MYSQL_RES *result = mysql_store_result(&db->mysql);
@@ -215,6 +229,7 @@ void db_update_coinds(YAAMP_DB *db)
 			coind->newcoind = true;
 			coind->newblock = true;
 			coind->id = atoi(row[0]);
+			yaamp_create_mutex(&coind->aux_mutex);
 			coind->aux.coind = coind;
 					   }
 		   else
@@ -310,7 +325,23 @@ void db_update_coinds(YAAMP_DB *db)
 		if(row[34] && atol(row[34]) > 0) g_max_shares = atol(row[34]);
 		if(row[35]) coind->usesegwit = atoi(row[35]) > 0;
 
+		if(row[36]) coind->auto_exchange = atoi(row[36]) > 0;
+		if(row[37]) coind->rpcdebug = atoi(row[37]) > 0;
+
+		if(row[38]) strcpy(coind->personalization, row[38]);
+
+		// use powlimit from coin, if not set - algo, defaults to 32
+		if(row[39]) coind->powlimit_bits = atoi(row[39]);
+		if (!coind->powlimit_bits) coind->powlimit_bits = g_current_algo->powlimit_bits;
+		if (!coind->powlimit_bits) coind->powlimit_bits = 32;
+
+		if(row[40]) coind->blocktime = atoi(row[40]);
+		
+		if(row[41]) coind->usemweb = atoi(row[41]) > 0;		
+
 		if(coind->usesegwit) g_stratum_segwit = true;
+		
+		if(coind->usemweb) g_stratum_mweb = true;
 
 		// force the right rpcencoding for DCR
 		if(!strcmp(coind->symbol, "DCR") && strcmp(coind->rpcencoding, "DCR"))

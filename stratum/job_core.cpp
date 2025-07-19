@@ -115,6 +115,7 @@ void job_unlock_clients(YAAMP_JOB *job)
 bool job_can_mine(YAAMP_JOB *job)
 {
 	if(job->deleted) return false;
+	if(job->status != JOB_STATUS_ACTIVE) return false;
 
 	if(job->remote)
 		return remote_can_mine(job->remote);

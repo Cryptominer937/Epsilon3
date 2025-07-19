@@ -33,7 +33,7 @@ int rpc_send_raw(YAAMP_RPC *rpc, const char *buffer, int bytes);
 int rpc_send(YAAMP_RPC *rpc, const char *format, ...);
 int rpc_flush(YAAMP_RPC *rpc);
 
-json_value *rpc_call(YAAMP_RPC *rpc, char const *method, char const *params=NULL);
+json_value *rpc_call(YAAMP_RPC *rpc, char const *method, char const *params=NULL, YAAMP_COIND *coind=NULL);
 
 json_value *rpc_curl_call(YAAMP_RPC *rpc, char const *method, char const *params);
 void rpc_curl_get_lasterr(char* buffer, int buflen);

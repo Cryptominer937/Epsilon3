@@ -16,6 +16,8 @@ struct YAAMP_ALGO
 	double diff_multiplier;
 	double factor;
 	YAAMP_HASH_FUNCTION merkle_func;
+	double speedfactor;
+	int powlimit_bits;
 
 	double profit;
 	double rent;
@@ -30,6 +32,8 @@ struct YAAMP_CLIENT_ALGO
 };
 
 #define YAAMP_JOB_MAXHISTORY	16
+
+#define YAAMP_CLIENT_MINSPEED	0.00001
 
 #define MIN_ADDRESS_LEN 3 /* BTC len can be as few as 26 chars, but gen. 33 or 34 */
 #define MAX_ADDRESS_LEN 98 /* BITC */
@@ -49,6 +53,8 @@ public:
 	bool reconnectable;
 	bool reconnecting;
 
+	bool is_nicehash;
+
 	int userid;
 	int workerid;
 	int coinid;
@@ -61,6 +67,9 @@ public:
 	char username[1024];
 	char password[1024];
 	char worker[1024];
+
+	std::vector<std::string> coins_mining_list;
+	std::vector<std::string> coins_ignore_list;
 
 	double difficulty_actual;
 	double difficulty_remote;
@@ -100,6 +109,12 @@ public:
 
 	int donation;
 	int broadcast_timeouts;
+
+	//////////////////////////////////////////////////
+	uint256 share_target;
+	uint256 next_target;
+	
+	bool solo;
 };
 
 inline void client_delete(YAAMP_OBJECT *object)
@@ -135,13 +150,14 @@ bool client_find_my_ip(const char *ip);
 //////////////////////////////////////////////////////////////////////////
 
 int client_send_difficulty(YAAMP_CLIENT *client, double difficulty);
-double client_normalize_difficulty(double difficulty);
+double client_normalize_difficulty(double difficulty, YAAMP_CLIENT *client);
 
 void client_change_difficulty(YAAMP_CLIENT *client, double difficulty);
 void client_record_difficulty(YAAMP_CLIENT *client);
 void client_adjust_difficulty(YAAMP_CLIENT *client);
 
 void client_initialize_difficulty(YAAMP_CLIENT *client);
+bool client_configure(YAAMP_CLIENT *client, json_value *json_params);
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -156,6 +172,7 @@ int client_send_error(YAAMP_CLIENT *client, int error, const char *string);
 bool client_ask_stats(YAAMP_CLIENT *client);
 
 bool client_submit(YAAMP_CLIENT *client, json_value *json_params);
+void client_submit_error(YAAMP_CLIENT *client, YAAMP_JOB *job, int id, const char *message, char *extranonce2, char *ntime, char *nonce);
 
 int client_workers_count(YAAMP_CLIENT *client);
 int client_workers_byaddress(const char *username);

@@ -36,7 +36,16 @@ double coind_profitability(YAAMP_COIND *coind)
 
 double coind_nethash(YAAMP_COIND *coind)
 {
-	double speed = coind->difficulty * 0x100000000 / 1000000 / max(min(coind->actual_ttf, 60), 30);
+	int blocktime = (coind->blocktime)? coind->blocktime : max(min(coind->actual_ttf, 60), 30);
+	int powlimit_bits = 32;
+
+	if (coind->powlimit_bits) powlimit_bits = coind->powlimit_bits;
+	else {
+		if (g_current_algo->powlimit_bits) powlimit_bits = g_current_algo->powlimit_bits;
+	}
+
+	double speed = coind->difficulty * pow(2, powlimit_bits)/ blocktime;
+
 //	if(!strcmp(g_current_algo->name, "sha256")) speed *= 1000;
 
 	return speed;
@@ -157,11 +166,15 @@ bool coind_validate_address(YAAMP_COIND *coind)
 		stratumlog("Warning: unable to decode %s %s script pubkey\n", coind->symbol, coind->wallet);
 
 	coind->p2sh_address = json_get_bool(json_result, "isscript");
+	coind->p2wpkh =  json_get_bool(json_result, "iswitness");
 
 	// if base58 decode fails
 	if (!strlen(coind->script_pubkey)) {
 		const char *pk = json_get_string(json_result, "scriptPubKey");
-		if (pk && strlen(pk) > 10) {
+		if (pk && coind->p2wpkh ) {
+			strcpy(coind->script_pubkey, pk);
+		}
+		else if (pk && strlen(pk) > 10) {
 			strcpy(coind->script_pubkey, &pk[6]);
 			coind->script_pubkey[strlen(pk)-6-4] = '\0';
 			stratumlog("%s %s extracted script pubkey is %s\n", coind->symbol, coind->wallet, coind->script_pubkey);
@@ -193,26 +206,34 @@ void coind_init(YAAMP_COIND *coind)
 	sprintf(params, "[\"legacy\"]", account);
 
 	json_value *json = rpc_call(&coind->rpc, "getrawchangeaddress", params);
-	if(!json)
-	{
-		json = rpc_call(&coind->rpc, "getaddressesbyaccount", params);
-		if (json && json_is_array(json) && json->u.object.length) {
-			debuglog("is array...");
-			if (json->u.object.values[0].value->type == json_string)
-				json = json->u.object.values[0].value;
-		}
-		if (!json) {
-			stratumlog("ERROR getaccountaddress %s\n", coind->name);
-			return;
-		}
-	}
-
-	if (json->u.object.values[0].value->type == json_string) {
+	if (json and json->u.object.values[0].value->type == json_string) {
 		strcpy(coind->wallet, json->u.object.values[0].value->u.string.ptr);
 	}
-	else {
-		strcpy(coind->wallet, "");
-		stratumlog("ERROR getaccountaddress %s\n", coind->name);
+	if (!valid) {
+		json = rpc_call(&coind->rpc, "getaddressesbyaccount", params);
+
+		if (json && json_is_array(json) && json->u.object.length) {
+			debuglog("is array...\n");
+			if (json->u.object.values[0].value->type == json_string)
+				strcpy(coind->wallet, json->u.object.values[0].value->u.string.ptr);
+		}
+	}
+	if (!valid) {
+		json = rpc_call(&coind->rpc, "getaddressesbylabel", params);
+		if (json and !strcmp(json->u.object.values[0].name, "result") and !strcmp(json->u.object.values[1].name, "error"))
+			if (json->u.object.values[1].value->type != json_object) { //{"result":{"SeaVFG3CRtSSP97BE5mhJA33EGtT1MkCj9":{"purpose":"receive"}},"error":null,"id":"3"}
+				strcpy(coind->wallet, json->u.object.values[0].value->u.object.values[0].name);
+			}
+			else { //{"result":null,"error":{"code":-18,"message":"No wallet is loaded. Load a wallet using loadwallet or create a new one with createwallet. (Note: A default wallet is no longer automatically created)"},"id":"3"}
+				if (json->u.object.values[1].value->u.object.values[0].value->type == json_integer and json->u.object.values[1].value->u.object.values[0].value->u.integer == -18) {
+					debuglog("NOTICE -- coind_init -- %s says there's no wallet (code -18), creating\n", coind->symbol);
+					json = rpc_call(&coind->rpc, "createwallet", params);
+					json = rpc_call(&coind->rpc, "getnewaddress", params);
+					if (json and json->u.object.values[0].value->type == json_string) {
+						strcpy(coind->wallet, json->u.object.values[0].value->u.string.ptr);
+					}
+				}
+			}
 	}
 
 	json_value_free(json);
