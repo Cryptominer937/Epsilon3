@@ -13,7 +13,7 @@
 #ifndef FIROPOW_PROGPOW_HPP
 #define FIROPOW_PROGPOW_HPP
 
-#include <include/ethash/ethash.hpp>
+#include <kawpow/include/ethash/ethash.hpp>
 
 namespace firopow
 {

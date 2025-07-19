@@ -8,9 +8,9 @@
 
 #include <firopow/hash.h>
 
-#include <hash.h>
-#include <helpers.hpp>
-#include <include/ethash/progpow.hpp>
+#include <kawpow/hash.h>
+#include <kawpow/helpers.hpp>
+#include <kawpow/include/ethash/progpow.hpp>
 
 static int g_extraonce1_counter = 0;
 static bool g_twobyte_extranonce = true;

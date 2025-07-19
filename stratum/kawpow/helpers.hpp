@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <include/ethash/ethash.hpp>
+#include <kawpow/include/ethash/ethash.hpp>
 
 #include <string>
 

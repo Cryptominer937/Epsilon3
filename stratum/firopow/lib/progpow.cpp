@@ -5,11 +5,11 @@
 
 #include <firopow/include/progpow.hpp>
 
-#include <lib/ethash/bit_manipulation.h>
-#include <lib/ethash/endianness.hpp>
-#include <lib/ethash/ethash-internal.hpp>
-#include <lib/ethash/kiss99.hpp>
-#include <include/ethash/keccak.hpp>
+#include <kawpow/lib/ethash/bit_manipulation.h>
+#include <kawpow/lib/ethash/endianness.hpp>
+#include <kawpow/lib/ethash/ethash-internal.hpp>
+#include <kawpow/lib/ethash/kiss99.hpp>
+#include <kawpow/include/ethash/keccak.hpp>
 
 #include <firopow/overrides.h>
 
